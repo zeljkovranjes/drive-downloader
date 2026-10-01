@@ -985,6 +985,7 @@ mod tests {
             secret_key: env("DD_S3_SECRET"),
             bucket: env("DD_S3_BUCKET"),
             path_style: true,
+            ..Default::default()
         };
         let source = PathBuf::from(env("DD_S3_SOURCE"));
         let dst = std::env::temp_dir().join(format!("dd_s3_{}", std::process::id()));

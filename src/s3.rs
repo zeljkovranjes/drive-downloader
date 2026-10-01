@@ -10,6 +10,7 @@ use crate::model::{Entry, Loc};
 use crate::util::{last_segment, unix_to_systime};
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct S3Login {
     /// e.g. http://192.168.1.10:9000 for RustFS/MinIO. Empty = AWS.
     pub endpoint: String,
@@ -19,6 +20,10 @@ pub struct S3Login {
     pub secret_key: String,
     pub bucket: String,
     pub path_style: bool,
+    /// Keep the login (secret encrypted with Windows DPAPI) and auto-connect on launch.
+    pub remember: bool,
+    /// Secret key encrypted for the current Windows user, hex encoded.
+    pub secret_protected: String,
 }
 
 pub fn err_text<E: std::error::Error>(e: E) -> String {

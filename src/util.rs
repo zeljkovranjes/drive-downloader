@@ -108,3 +108,81 @@ pub fn write_all_at(f: &std::fs::File, mut buf: &[u8], mut off: u64) -> std::io:
         f.write_all_at(buf, off)
     }
 }
+
+/// Encrypt a secret for the current Windows user (DPAPI). Returns hex.
+#[cfg(windows)]
+pub fn protect(plain: &str) -> Option<String> {
+    let out = dpapi::run(plain.as_bytes(), true)?;
+    Some(out.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+#[cfg(windows)]
+pub fn unprotect(hex: &str) -> Option<String> {
+    if hex.is_empty() || hex.len() % 2 != 0 || !hex.is_ascii() {
+        return None;
+    }
+    let bytes: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16)).collect::<Result<_, _>>().ok()?;
+    String::from_utf8(dpapi::run(&bytes, false)?).ok()
+}
+
+// No secure store wired up off Windows: don't persist the secret.
+#[cfg(not(windows))]
+pub fn protect(_plain: &str) -> Option<String> {
+    None
+}
+#[cfg(not(windows))]
+pub fn unprotect(_hex: &str) -> Option<String> {
+    None
+}
+
+#[cfg(windows)]
+mod dpapi {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    struct Blob {
+        len: u32,
+        data: *mut u8,
+    }
+
+    #[link(name = "crypt32")]
+    unsafe extern "system" {
+        fn CryptProtectData(input: *const Blob, desc: *const u16, entropy: *const Blob, reserved: *mut c_void,
+            prompt: *mut c_void, flags: u32, out: *mut Blob) -> i32;
+        fn CryptUnprotectData(input: *const Blob, desc: *mut *mut u16, entropy: *const Blob, reserved: *mut c_void,
+            prompt: *mut c_void, flags: u32, out: *mut Blob) -> i32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LocalFree(mem: *mut c_void) -> *mut c_void;
+    }
+
+    const CRYPTPROTECT_UI_FORBIDDEN: u32 = 0x1;
+
+    pub fn run(data: &[u8], encrypt: bool) -> Option<Vec<u8>> {
+        let input = Blob { len: data.len() as u32, data: data.as_ptr() as *mut u8 };
+        let mut out = Blob { len: 0, data: std::ptr::null_mut() };
+        let null = std::ptr::null_mut();
+        let ok = unsafe {
+            if encrypt {
+                CryptProtectData(&input, std::ptr::null(), std::ptr::null(), null, null, CRYPTPROTECT_UI_FORBIDDEN, &mut out)
+            } else {
+                CryptUnprotectData(&input, std::ptr::null_mut(), std::ptr::null(), null, null, CRYPTPROTECT_UI_FORBIDDEN, &mut out)
+            }
+        };
+        if ok == 0 || out.data.is_null() {
+            return None;
+        }
+        let v = unsafe { std::slice::from_raw_parts(out.data, out.len as usize) }.to_vec();
+        unsafe { LocalFree(out.data as *mut c_void) };
+        Some(v)
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn roundtrip() {
+        let enc = super::protect("s3cr3t/key+=").unwrap();
+        assert!(!enc.contains("s3cr3t"));
+        assert_eq!(super::unprotect(&enc).as_deref(), Some("s3cr3t/key+="));
+    }
+}

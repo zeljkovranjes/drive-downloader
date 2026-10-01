@@ -50,7 +50,7 @@ impl Default for Settings {
             auto_tune: true,
             skip_identical: true,
             net_only: false,
-            login: S3Login { path_style: true, region: "us-east-1".into(), ..Default::default() },
+            login: S3Login { path_style: true, remember: true, region: "us-east-1".into(), ..Default::default() },
         }
     }
 }
@@ -94,7 +94,11 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, rt: tokio::runtime::Runtime) -> Self {
-        let set: Settings = cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
+        let mut set: Settings = cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
+        if set.login.remember {
+            set.login.secret_key = crate::util::unprotect(&set.login.secret_protected).unwrap_or_default();
+        }
+        let auto_connect = set.login.remember && !set.login.access_key.trim().is_empty() && !set.login.secret_key.is_empty();
         let (tx, rx) = mpsc::channel();
         let mut app = Self {
             rt,
@@ -123,6 +127,10 @@ impl App {
             log: Vec::new(),
         };
         app.refresh_drives();
+        if auto_connect {
+            app.source = Source::S3;
+            app.connect();
+        }
         app
     }
 
@@ -154,6 +162,8 @@ impl App {
         self.cur = Some(loc.clone());
         self.entries.clear();
         self.filter.clear();
+        // Selection belongs to the folder you're looking at, so nothing stale gets downloaded.
+        self.selected.clear();
         self.listing_gen += 1;
         self.loading = true;
         self.browse_status = format!("Loading {} ...", loc.display());
@@ -205,7 +215,7 @@ impl App {
                         Ok(entries) => {
                             let nd = entries.iter().filter(|e| e.is_dir).count();
                             self.browse_status = format!(
-                                "{} folders, {} files  ({secs:.2}s).  Tick boxes to select; double-click a folder to open it.",
+                                "{} folders, {} files  ({secs:.2}s).  Click a folder to open it; tick boxes to select what to download.",
                                 nd,
                                 entries.len() - nd
                             );
@@ -495,8 +505,9 @@ impl App {
                         ui.end_row();
                         ui.label("Bucket");
                         ui.add(egui::TextEdit::singleline(&mut l.bucket).hint_text("optional - empty lists all buckets").desired_width(320.0));
-                        ui.checkbox(&mut l.path_style, "Path-style URLs");
-                        ui.label("(keep on for RustFS / MinIO)");
+                        ui.checkbox(&mut l.path_style, "Path-style URLs (RustFS / MinIO)");
+                        ui.checkbox(&mut l.remember, "Remember login")
+                            .on_hover_text("Saves the login (secret key encrypted for your Windows account) and connects automatically on launch.");
                         ui.end_row();
                     });
                     ui.horizontal(|ui| {
@@ -591,10 +602,13 @@ impl App {
                         row.col(|ui| {
                             let icon = if e.is_dir { "📁" } else { "📄" };
                             let r = ui.selectable_label(on, format!("{icon} {}", e.name));
-                            if e.is_dir && r.double_clicked() {
-                                nav = Some(e.loc.clone());
-                            } else if r.clicked() {
-                                Self::toggle(selected, e, !on);
+                            // Folder name opens the folder; only its checkbox selects it.
+                            if r.clicked() {
+                                if e.is_dir {
+                                    nav = Some(e.loc.clone());
+                                } else {
+                                    Self::toggle(selected, e, !on);
+                                }
                             }
                         });
                         row.col(|ui| {
@@ -706,6 +720,12 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        let l = &mut self.set.login;
+        l.secret_protected = if l.remember && !l.secret_key.is_empty() {
+            crate::util::protect(&l.secret_key).unwrap_or_default()
+        } else {
+            String::new()
+        };
         eframe::set_value(storage, eframe::APP_KEY, &self.set);
     }
 
